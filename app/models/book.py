@@ -1,10 +1,12 @@
-from datetime import datetime, timedelta
+from datetime import datetime
+from enum import Enum as PyEnum
+from typing import List
 
-from sqlalchemy import ForeignKey, func
+from sqlalchemy import ForeignKey, func, Enum
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.config import settings
 from app.database import Base
+
 
 class Books(Base):
     __tablename__ = "books"
@@ -17,20 +19,44 @@ class Books(Base):
     country: Mapped[str] = mapped_column()
     pages: Mapped[int] = mapped_column()
 
+    favorited_by: Mapped[List["User"]] = relationship(
+        "User",
+        secondary="user_favorites",
+        back_populates="favorites"
+    )
+
+
+class BorrowingStatus(PyEnum):
+    PENDING = "pending"  # Забронировано (книга еще в библиотеке)
+    ISSUED = "issued"  # Выдано (книга у студента)
+    RETURNED = "returned"  # Вернули обратно
+    CANCELLED = "cancelled"  # Студент передумал или не пришел
+    OVERDUE = "overdue"  # Просрочено (не забрали вовремя или не вернули вовремя)
+
+
 class Borrowing(Base):
     __tablename__ = "borrowings"
 
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
     book_id: Mapped[int] = mapped_column(ForeignKey("books.id"))
-    librarian_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), default=None)
 
-    borrowed_at: Mapped[datetime] = mapped_column(server_default=func.now())
-    due_date: Mapped[datetime] = mapped_column(
-        default=lambda: datetime.now() + timedelta(days=settings.BORROWING_DAYS)
+    # Кто выдал/принял книгу
+    librarian_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+
+    # Текущее состояние
+    status: Mapped[BorrowingStatus] = mapped_column(
+        Enum(BorrowingStatus),
+        default=BorrowingStatus.PENDING
     )
-    returned_at: Mapped[datetime | None] = mapped_column(default=None)
 
+    # Таймстампы
+    reserved_at: Mapped[datetime] = mapped_column(server_default=func.now())  # Дата брони
+    issued_at: Mapped[datetime | None] = mapped_column(nullable=True)  # Дата выдачи в руки
+    due_date: Mapped[datetime | None] = mapped_column(nullable=True)  # Дедлайн
+    returned_at: Mapped[datetime | None] = mapped_column(nullable=True)  # Когда вернули
+
+    # Отношения
     user: Mapped["User"] = relationship("User", foreign_keys=[user_id], back_populates="borrowed_books")
     librarian: Mapped["User | None"] = relationship("User", foreign_keys=[librarian_id])
     book: Mapped["Books"] = relationship()

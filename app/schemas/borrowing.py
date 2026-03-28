@@ -1,8 +1,12 @@
 from datetime import datetime
-from pydantic import BaseModel
 from typing import Optional
+
+from pydantic import BaseModel
+
+from app.models.book import BorrowingStatus
 from app.schemas.book import BookResponse
 from app.schemas.user import UserRead
+
 
 class BorrowingBase(BaseModel):
     book_id: int
@@ -18,12 +22,14 @@ class BorrowingResponse(BaseModel):
     id: int
     user_id: int
     book_id: int
-    borrowed_at: datetime
-    due_date: datetime
+    status: BorrowingStatus
+    reserved_at: datetime
+    issued_at: Optional[datetime] = None
+    due_date: Optional[datetime] = None
     returned_at: Optional[datetime] = None
     book: BookResponse
     user: Optional[UserRead] = None
-    librarian: Optional[UserRead] = None # Added to show who processed the return
+    librarian: Optional[UserRead] = None
 
     class Config:
         from_attributes = True

@@ -1,8 +1,10 @@
 from typing import Annotated
+
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from app.dependencies import get_current_user, get_db
 from app.models.user import User
 from app.schemas.user import UserRead, UserUpdate
@@ -25,7 +27,7 @@ async def update_profile(
     update_data = user_in.model_dump(exclude_unset=True)
 
     # Sensitive fields that require current password verification
-    sensitive_fields = ["email", "password"]
+    sensitive_fields = ["username", "password"]
     requires_verification = any(field in update_data for field in sensitive_fields)
 
     if requires_verification:
@@ -34,16 +36,16 @@ async def update_profile(
         ):
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Correct current password is required to update email or password"
+                detail="Correct current password is required to update username or password"
             )
 
-    if "email" in update_data and update_data["email"] != current_user.email:
-        query = select(User).where(User.email == update_data["email"])
+    if "username" in update_data and update_data["username"] != current_user.username:
+        query = select(User).where(User.username == update_data["username"])
         result = await db.execute(query)
         if result.scalar_one_or_none():
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Email already registered"
+                detail="Username already registered"
             )
 
     if "password" in update_data:
@@ -63,7 +65,7 @@ async def update_profile(
         await db.rollback()
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Error updating profile. Email might already be in use."
+            detail="Error updating profile. Username might already be in use."
         )
     return current_user
 

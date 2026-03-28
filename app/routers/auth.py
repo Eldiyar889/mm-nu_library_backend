@@ -1,21 +1,22 @@
 from typing import Annotated
+
+import jwt
 from fastapi import APIRouter, Depends, HTTPException, status, Response, Request
 from fastapi.security import OAuth2PasswordRequestForm
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
 from pydantic import BaseModel, ValidationError
-import jwt
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
 from app.dependencies import get_db, get_current_user
 from app.models.user import User
-from app.schemas.user import UserCreate, UserRead, TokenData, Token
+from app.schemas.user import UserCreate, UserRead, TokenData
 from app.security import (
-    get_password_hash, 
-    verify_password, 
-    create_access_token, 
+    get_password_hash,
+    verify_password,
+    create_access_token,
     create_refresh_token
 )
-from app.config import settings
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -27,16 +28,16 @@ async def register(
     user_in: UserCreate,
     db: Annotated[AsyncSession, Depends(get_db)]
 ):
-    query = select(User).where(User.email == user_in.email)
+    query = select(User).where(User.username == user_in.username)
     result = await db.execute(query)
     if result.scalar_one_or_none():
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="User with this email already exists",
+            detail="User with this username already exists",
         )
     
     db_user = User(
-        email=user_in.email,
+        username=user_in.username,
         full_name=user_in.full_name,
         hashed_password=get_password_hash(user_in.password),
     )
@@ -51,14 +52,14 @@ async def login(
     form_data: Annotated[OAuth2PasswordRequestForm, Depends()],
     db: Annotated[AsyncSession, Depends(get_db)]
 ):
-    query = select(User).where(User.email == form_data.username)
+    query = select(User).where(User.username == form_data.username)
     result = await db.execute(query)
     user = result.scalar_one_or_none()
     
     if not user or not verify_password(form_data.password, user.hashed_password):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Incorrect email or password",
+            detail="Incorrect username or password",
         )
     
     access_token = create_access_token(subject=user.id)
