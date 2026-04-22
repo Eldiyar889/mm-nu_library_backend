@@ -18,27 +18,17 @@ async def get_profile(
 ):
     return current_user
 
+
 @router.patch("/me", response_model=UserRead)
 async def update_profile(
         current_user: Annotated[User, Depends(get_current_user)],
         db: Annotated[AsyncSession, Depends(get_db)],
         user_in: UserUpdate
 ):
+    # Извлекаем только те поля, которые прислал пользователь
     update_data = user_in.model_dump(exclude_unset=True)
 
-    # Sensitive fields that require current password verification
-    sensitive_fields = ["username", "password"]
-    requires_verification = any(field in update_data for field in sensitive_fields)
-
-    if requires_verification:
-        if not user_in.current_password or not verify_password(
-            user_in.current_password, current_user.hashed_password
-        ):
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Correct current password is required to update username or password"
-            )
-
+    # 1. Проверка уникальности нового Username
     if "username" in update_data and update_data["username"] != current_user.username:
         query = select(User).where(User.username == update_data["username"])
         result = await db.execute(query)
@@ -48,12 +38,26 @@ async def update_profile(
                 detail="Username already registered"
             )
 
-    if "password" in update_data:
-        update_data["hashed_password"] = get_password_hash(update_data.pop("password"))
+    # 2. Логика смены пароля
+    # Проверяем, что пользователь передал все поля для смены пароля
+    if user_in.new_password:
+        # А) Проверяем совпадение новых паролей
+        if user_in.new_password != user_in.repeat_new_password:
+            raise HTTPException(status_code=400, detail="New passwords do not match")
 
-    # Remove current_password from update_data so it doesn't get treated as a model field
-    update_data.pop("current_password", None)
+        # Б) Проверяем старый пароль (обязательно!)
+        if not verify_password(user_in.last_password, current_user.hashed_password):
+            raise HTTPException(status_code=400, detail="Incorrect current password")
 
+        # В) Хэшируем новый и удаляем лишнее из словаря
+        update_data["hashed_password"] = get_password_hash(user_in.new_password)
+
+    # Удаляем поля, которых нет в модели базы данных (User),
+    # чтобы setattr не упал с ошибкой
+    for field in ["new_password", "repeat_new_password", "last_password"]:
+        update_data.pop(field, None)
+
+    # 3. Обновление объекта
     for field, value in update_data.items():
         setattr(current_user, field, value)
 
@@ -65,7 +69,7 @@ async def update_profile(
         await db.rollback()
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Error updating profile. Username might already be in use."
+            detail="Error updating profile."
         )
     return current_user
 

@@ -1,27 +1,54 @@
+import os
+import shutil
 from datetime import datetime, timedelta
-from typing import Annotated, List
+from typing import Annotated, List, Union, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select, and_, delete, update
+from fastapi import APIRouter, Depends, HTTPException, status, Form, UploadFile, File
+from fastapi.responses import FileResponse
+from sqlalchemy import select, and_, delete, update, desc, or_
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import selectinload, with_polymorphic
 
 from app.dependencies import get_db, get_current_librarian, get_current_user
-from app.models.book import Books, Borrowing, BorrowingStatus
-from app.models.user import User, user_favorites
-from app.schemas.book import BookCreate, BookUpdate, BookResponse
-from app.schemas.borrowing import BorrowingResponse
+from app.models.book import Book, PhysicalBook, EBook, Borrowing, BorrowingStatus, BookType, EBookInstall
+from app.models.user import User, user_favorites, UserRole
+from app.schemas.book import (
+    BookResponse, PhysicalBookCreate, PhysicalBookUpdate, 
+    EBookCreate, EBookUpdate, PhysicalBookResponse, EBookResponse,
+    EBookInstallResponse
+)
+from app.schemas.borrowing import BorrowingResponse, MyBooksResponse
 
 router = APIRouter(prefix="/books", tags=["books"])
 
 @router.get("/", response_model=List[BookResponse])
 async def get_all_books(
     db: Annotated[AsyncSession, Depends(get_db)],
-        current_user: Annotated[User, Depends(get_current_user)],
     skip: int = 0,
-    limit: int = 100
+    limit: int = 100,
+    search: Optional[str] = None
 ):
-    query = select(Books).offset(skip).limit(limit)
+    """
+    Get all books (Physical and Digital) with searching and efficient polymorphic loading.
+    """
+    # with_polymorphic allows us to join all subclass tables and access their columns in one query
+    wp = with_polymorphic(Book, [PhysicalBook, EBook])
+    query = select(wp)
+    
+    if search:
+        search_filter = f"%{search}%"
+        query = query.where(
+            or_(
+                wp.title.ilike(search_filter),
+                wp.author.ilike(search_filter)
+            )
+        )
+    
+    # Efficiently load borrowings for physical books to calculate availability
+    query = query.options(selectinload(wp.PhysicalBook.borrowings))
+    
+    query = query.offset(skip).limit(limit).order_by(desc(wp.id))
+    
     result = await db.execute(query)
     return result.scalars().all()
 
@@ -29,39 +56,101 @@ async def get_all_books(
 async def get_book(
         book_id: int,
         db: Annotated[AsyncSession, Depends(get_db)],
-        current_user: Annotated[User, Depends(get_current_user)]
 ):
-    query = select(Books).where(Books.id == book_id)
+    """Get details of a specific book (Physical or Digital)."""
+    wp = with_polymorphic(Book, [PhysicalBook, EBook])
+    query = select(wp).where(wp.id == book_id).options(
+        selectinload(wp.PhysicalBook.borrowings)
+    )
     result = await db.execute(query)
     book = result.scalar_one_or_none()
     if not book:
         raise HTTPException(status_code=404, detail="Book not found")
     return book
 
-@router.post("/", response_model=BookResponse, status_code=status.HTTP_201_CREATED)
-async def create_book(
-    book_in: BookCreate,
+@router.post("/physical", response_model=PhysicalBookResponse, status_code=status.HTTP_201_CREATED)
+async def create_physical_book(
+    book_in: PhysicalBookCreate,
     db: Annotated[AsyncSession, Depends(get_db)],
     current_librarian: Annotated[User, Depends(get_current_librarian)]
 ):
-    new_book = Books(**book_in.model_dump())
+    """Create a new physical book."""
+    if book_in.library_number:
+        query = select(PhysicalBook).where(PhysicalBook.library_number == book_in.library_number)
+        result = await db.execute(query)
+        if result.scalar_one_or_none():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Physical book with library number '{book_in.library_number}' already exists."
+            )
+
+    new_book = PhysicalBook(**book_in.model_dump())
     db.add(new_book)
     await db.commit()
     await db.refresh(new_book)
-    return new_book
+    
+    # Reload with polymorphic mapper and borrowings to satisfy schema
+    wp = with_polymorphic(Book, [PhysicalBook, EBook])
+    query = select(wp).where(wp.id == new_book.id).options(
+        selectinload(wp.PhysicalBook.borrowings)
+    )
+    result = await db.execute(query)
+    return result.scalar_one()
 
-@router.patch("/{book_id}", response_model=BookResponse)
-async def update_book(
+@router.patch("/physical/{book_id}", response_model=PhysicalBookResponse)
+async def update_physical_book(
     book_id: int,
-    book_in: BookUpdate,
+    book_in: PhysicalBookUpdate,
     db: Annotated[AsyncSession, Depends(get_db)],
     current_librarian: Annotated[User, Depends(get_current_librarian)]
 ):
-    query = select(Books).where(Books.id == book_id)
+    """Update a physical book's information."""
+    wp = with_polymorphic(Book, [PhysicalBook, EBook])
+    query = select(wp).where(wp.id == book_id).options(
+        selectinload(wp.PhysicalBook.borrowings)
+    )
     result = await db.execute(query)
     book = result.scalar_one_or_none()
     if not book:
-        raise HTTPException(status_code=404, detail="Book not found")
+        raise HTTPException(status_code=404, detail="Physical book not found")
+    
+    update_data = book_in.model_dump(exclude_unset=True)
+    
+    if "library_number" in update_data and update_data["library_number"] != book.library_number:
+        query = select(PhysicalBook).where(
+            and_(
+                PhysicalBook.library_number == update_data["library_number"],
+                PhysicalBook.id != book_id
+            )
+        )
+        result = await db.execute(query)
+        if result.scalar_one_or_none():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Physical book with library number '{update_data['library_number']}' already exists."
+            )
+
+    for field, value in update_data.items():
+        setattr(book, field, value)
+    
+    db.add(book)
+    await db.commit()
+    await db.refresh(book)
+    return book
+
+@router.patch("/ebook/{book_id}", response_model=EBookResponse)
+async def update_ebook(
+    book_id: int,
+    book_in: EBookUpdate,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_librarian: Annotated[User, Depends(get_current_librarian)]
+):
+    """Update an e-book's information."""
+    query = select(EBook).where(EBook.id == book_id)
+    result = await db.execute(query)
+    book = result.scalar_one_or_none()
+    if not book:
+        raise HTTPException(status_code=404, detail="E-book not found")
     
     update_data = book_in.model_dump(exclude_unset=True)
     for field, value in update_data.items():
@@ -78,7 +167,8 @@ async def delete_book(
     db: Annotated[AsyncSession, Depends(get_db)],
     current_librarian: Annotated[User, Depends(get_current_librarian)]
 ):
-    query = select(Books).where(Books.id == book_id)
+    """Delete any book (Physical or Digital)."""
+    query = select(Book).where(Book.id == book_id)
     result = await db.execute(query)
     book = result.scalar_one_or_none()
     if not book:
@@ -92,65 +182,58 @@ async def delete_book(
 # --- Favorites Endpoints ---
 
 @router.post("/{book_id}/favorite", status_code=status.HTTP_200_OK)
-async def add_book_to_favorites(
+async def toggle_favorite(
         book_id: int,
         db: Annotated[AsyncSession, Depends(get_db)],
         current_user: Annotated[User, Depends(get_current_user)]
 ):
-    # Check if book exists
-    query = select(Books).where(Books.id == book_id)
+    """Add/Remove book from favorites."""
+    # Check if the book exists
+    query = select(Book).where(Book.id == book_id)
     result = await db.execute(query)
     book = result.scalar_one_or_none()
     if not book:
         raise HTTPException(status_code=404, detail="Book not found")
 
-    # Check if already in favorites
+    # Check if already favorited
     query = select(user_favorites).where(
-        and_(user_favorites.c.user_id == current_user.id, user_favorites.c.book_id == book_id)
+        user_favorites.c.user_id == current_user.id,
+        user_favorites.c.book_id == book_id
     )
     result = await db.execute(query)
-    if result.one_or_none():
-        return {"message": "Book already in favorites"}
+
+    if result.first():
+        # Remove from favorites
+        stmt = delete(user_favorites).where(
+            user_favorites.c.user_id == current_user.id,
+            user_favorites.c.book_id == book_id
+        )
+        await db.execute(stmt)
+        await db.commit()
+        return {"message": "Removed from favorites"}
 
     # Add to favorites
     stmt = user_favorites.insert().values(user_id=current_user.id, book_id=book_id)
     await db.execute(stmt)
     await db.commit()
-    return {"message": "Book added to favorites"}
 
-
-@router.delete("/{book_id}/favorite", status_code=status.HTTP_200_OK)
-async def remove_book_from_favorites(
-        book_id: int,
-        db: Annotated[AsyncSession, Depends(get_db)],
-        current_user: Annotated[User, Depends(get_current_user)]
-):
-    # Check if book exists
-    query = select(Books).where(Books.id == book_id)
-    result = await db.execute(query)
-    book = result.scalar_one_or_none()
-    if not book:
-        raise HTTPException(status_code=404, detail="Book not found")
-
-    # Remove from favorites
-    stmt = delete(user_favorites).where(
-        and_(user_favorites.c.user_id == current_user.id, user_favorites.c.book_id == book_id)
-    )
-    await db.execute(stmt)
-    await db.commit()
-    return {"message": "Book removed from favorites"}
-
+    return {"message": "Added to favorites"}
 
 @router.get("/my/favorites", response_model=List[BookResponse])
 async def get_my_favorites(
         db: Annotated[AsyncSession, Depends(get_db)],
         current_user: Annotated[User, Depends(get_current_user)]
 ):
-    query = select(Books).join(user_favorites).where(user_favorites.c.user_id == current_user.id)
+    """Get user's favorite books (both physical and digital)."""
+    wp = with_polymorphic(Book, [PhysicalBook, EBook])
+    query = select(wp).join(user_favorites).where(
+        user_favorites.c.user_id == current_user.id
+    ).options(selectinload(wp.PhysicalBook.borrowings))
     result = await db.execute(query)
     return result.scalars().all()
 
-# --- Borrowing Endpoints (User) ---
+
+# --- Borrowing Endpoints (Physical Books only) ---
 
 @router.post("/{book_id}/borrow", response_model=BorrowingResponse)
 async def borrow_book(
@@ -158,31 +241,39 @@ async def borrow_book(
     db: Annotated[AsyncSession, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)]
 ):
-    query = select(Books).where(Books.id == book_id)
+    """Reserve a physical book for borrowing."""
+    query = select(PhysicalBook).where(PhysicalBook.id == book_id)
     result = await db.execute(query)
     book = result.scalar_one_or_none()
+    
     if not book:
-        raise HTTPException(status_code=404, detail="Book not found")
+        raise HTTPException(status_code=404, detail="Physical book not found")
 
-    query = select(Borrowing).where(
-        and_(Borrowing.book_id == book_id, Borrowing.returned_at == None)
+    # Check if stock is available
+    active_borrowings_count_query = select(Borrowing).where(
+        and_(
+            Borrowing.book_id == book_id,
+            Borrowing.status.in_([BorrowingStatus.PENDING, BorrowingStatus.ISSUED, BorrowingStatus.OVERDUE])
+        )
     )
-    result = await db.execute(query)
-    if result.scalar_one_or_none():
-        raise HTTPException(status_code=400, detail="Book is already borrowed")
+    result = await db.execute(active_borrowings_count_query)
+    active_borrowings_count = len(result.scalars().all())
+    
+    if active_borrowings_count >= book.stock_quantity:
+        raise HTTPException(status_code=400, detail="Book is currently out of stock")
 
-    # Check if user has any unreturned books (ISSUED or OVERDUE)
+    # Check if user has any overdue books
     query = select(Borrowing).where(
         and_(
             Borrowing.user_id == current_user.id,
-            Borrowing.status.in_([BorrowingStatus.ISSUED, BorrowingStatus.OVERDUE])
+            Borrowing.status == BorrowingStatus.OVERDUE
         )
     )
     result = await db.execute(query)
     if result.scalars().first():
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="You cannot borrow a new book until you return your current one."
+            detail="You cannot borrow a new book until you return your current overdue books."
         )
 
     new_borrowing = Borrowing(
@@ -194,123 +285,138 @@ async def borrow_book(
     await db.refresh(new_borrowing)
     
     query = select(Borrowing).where(Borrowing.id == new_borrowing.id).options(
-        selectinload(Borrowing.book),
-        selectinload(Borrowing.user),
-        selectinload(Borrowing.librarian)
+        selectinload(Borrowing.book).selectinload(PhysicalBook.borrowings),
+        selectinload(Borrowing.user)
     )
     result = await db.execute(query)
     return result.scalar_one()
 
 
-@router.post("/borrowings/{borrowing_id}/cancel", response_model=BorrowingResponse)
-async def cancel_borrowing(
-        borrowing_id: int,
-        db: Annotated[AsyncSession, Depends(get_db)],
-        current_user: Annotated[User, Depends(get_current_user)]
+# --- E-Book Specific Endpoints ---
+
+def ebook_form_data(
+    title: str = Form(...),
+    author: str = Form(...),
+    year: int = Form(0),
+    country: str = Form("Digital"),
+    pages: int = Form(0),
+    file_format: str = Form("pdf")
 ):
-    """
-    Cancel a PENDING or OVERDUE (not yet issued) borrowing.
-    Users can cancel their own; librarians can cancel any.
-    """
-    query = select(Borrowing).where(Borrowing.id == borrowing_id).options(
-        selectinload(Borrowing.book),
-        selectinload(Borrowing.user),
-        selectinload(Borrowing.librarian)
+    return EBookCreate(
+        title=title,
+        author=author,
+        year=year,
+        country=country,
+        pages=pages,
+        file_format=file_format
     )
-    result = await db.execute(query)
-    borrowing = result.scalar_one_or_none()
 
-    if not borrowing:
-        raise HTTPException(status_code=404, detail="Borrowing record not found")
+@router.post("/upload-ebook", response_model=EBookResponse)
+async def upload_ebook(
+        db: AsyncSession = Depends(get_db),
+        file: UploadFile = File(...),
+        data: EBookCreate = Depends(ebook_form_data),
+        current_librarian: Annotated[User, Depends(get_current_librarian)] = None
+):
+    """Upload a new e-book with file."""
+    if not os.path.exists("uploads"):
+        os.makedirs("uploads")
 
-    # Check permission: owner or librarian
-    if borrowing.user_id != current_user.id and not current_user.is_librarian:
-        raise HTTPException(status_code=403, detail="Not enough permissions to cancel this borrowing")
+    file_path = os.path.join("uploads", file.filename)
+    with open(file_path, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
 
-    # Only allow cancellation if not yet issued
-    if borrowing.status not in [BorrowingStatus.PENDING, BorrowingStatus.OVERDUE]:
-        raise HTTPException(status_code=400, detail=f"Cannot cancel borrowing with status {borrowing.status}")
+    new_book = EBook(
+        **data.model_dump(),
+        file_url=file_path,
+        book_type=BookType.DIGITAL
+    )
 
-    if borrowing.issued_at is not None:
-        raise HTTPException(status_code=400, detail="Cannot cancel a book that has already been issued")
-
-    borrowing.status = BorrowingStatus.CANCELLED
+    db.add(new_book)
     await db.commit()
-    await db.refresh(borrowing)
-    return borrowing
+    await db.refresh(new_book)
+    return new_book
 
-
-async def update_overdue_borrowings(db: AsyncSession):
-    """
-    Update PENDING borrowings to OVERDUE if they are older than 1 day.
-    Update ISSUED borrowings to OVERDUE if they passed due_date.
-    """
-    now = datetime.now()
-    reservation_threshold = now - timedelta(days=1)
-
-    # 1. Check reservation expiration
-    stmt1 = (
-        update(Borrowing)
-        .where(
-            and_(
-                Borrowing.status == BorrowingStatus.PENDING,
-                Borrowing.reserved_at < reservation_threshold
-            )
-        )
-        .values(status=BorrowingStatus.OVERDUE)
-    )
-
-    # 2. Check return deadline
-    stmt2 = (
-        update(Borrowing)
-        .where(
-            and_(
-                Borrowing.status == BorrowingStatus.ISSUED,
-                Borrowing.due_date < now
-            )
-        )
-        .values(status=BorrowingStatus.OVERDUE)
-    )
-
-    await db.execute(stmt1)
-    await db.execute(stmt2)
-    await db.commit()
-
-
-@router.get("/my/books", response_model=List[BorrowingResponse])
-async def get_my_borrowings(
+@router.get("/my/collection", response_model=MyBooksResponse)
+async def get_my_collection(
     db: Annotated[AsyncSession, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)]
 ):
-    await update_overdue_borrowings(db)
-    query = select(Borrowing).where((Borrowing.user_id == current_user.id)).options(
-        selectinload(Borrowing.book),
-        selectinload(Borrowing.user),
-        selectinload(Borrowing.librarian)
+    """Get both physical borrowings and digital installs in one API."""
+    # Fetch Physical Borrowings
+    borrowings_query = select(Borrowing).where(
+        Borrowing.user_id == current_user.id
+    ).options(
+        selectinload(Borrowing.book).selectinload(PhysicalBook.borrowings),
+        selectinload(Borrowing.user)
     )
-    result = await db.execute(query)
-    return result.scalars().all()
+    borrowings_result = await db.execute(borrowings_query)
+    physical_borrowings = borrowings_result.scalars().all()
 
+    # Fetch Digital Installs
+    installs_query = select(EBookInstall).where(
+        EBookInstall.user_id == current_user.id
+    ).options(selectinload(EBookInstall.book))
+    installs_result = await db.execute(installs_query)
+    digital_installs = installs_result.scalars().all()
 
-# --- Librarian Borrowing Management ---
+    return {
+        "physical_borrowings": physical_borrowings,
+        "digital_installs": digital_installs
+    }
 
-@router.get("/borrowings/all", response_model=List[BorrowingResponse])
-async def get_all_borrowings(
-        db: Annotated[AsyncSession, Depends(get_db)],
-        current_librarian: Annotated[User, Depends(get_current_librarian)]
+@router.get("/my/ebooks", response_model=List[EBookInstallResponse])
+async def get_my_ebooks(
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)]
 ):
-    """
-    Get all borrowings in the system. Accessible only by librarians.
-    """
-    await update_overdue_borrowings(db)
-    query = select(Borrowing).options(
-        selectinload(Borrowing.book),
-        selectinload(Borrowing.user),
-        selectinload(Borrowing.librarian)
-    )
+    """Get list of e-books 'installed' by the current user."""
+    query = select(EBookInstall).where(
+        EBookInstall.user_id == current_user.id
+    ).options(selectinload(EBookInstall.book))
     result = await db.execute(query)
     return result.scalars().all()
 
+@router.get("/{book_id}/download")
+async def download_ebook(
+    book_id: int,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)]
+):
+    """Download an e-book and increment install count."""
+    query = select(EBook).where(EBook.id == book_id)
+    result = await db.execute(query)
+    ebook = result.scalar_one_or_none()
+    
+    if not ebook:
+        raise HTTPException(status_code=404, detail="E-book not found")
+    
+    if not ebook.file_url or not os.path.exists(ebook.file_url):
+        raise HTTPException(status_code=404, detail="E-book file not found on server")
+    
+    # Check if already installed by this user to avoid double counting for the same user
+    # but we increment total_installs anyway as a global metric
+    ebook.total_installs += 1
+    
+    # Record the installation for the user if not already recorded
+    install_query = select(EBookInstall).where(
+        and_(EBookInstall.user_id == current_user.id, EBookInstall.book_id == book_id)
+    )
+    install_result = await db.execute(install_query)
+    if not install_result.scalar_one_or_none():
+        new_install = EBookInstall(user_id=current_user.id, book_id=book_id)
+        db.add(new_install)
+    
+    await db.commit()
+    
+    return FileResponse(
+        path=ebook.file_url,
+        filename=f"{ebook.title}.{ebook.file_format}",
+        media_type='application/octet-stream'
+    )
+
+
+# --- Generic Librarian Management ---
 
 @router.post("/borrowings/{borrowing_id}/issue", response_model=BorrowingResponse)
 async def issue_book(
@@ -318,11 +424,9 @@ async def issue_book(
         db: Annotated[AsyncSession, Depends(get_db)],
         current_librarian: Annotated[User, Depends(get_current_librarian)]
 ):
-    """
-    Mark a borrowing as ISSUED. Set issued_at, due_date (14 days), and librarian_id.
-    """
+    """Librarian: Issue a reserved physical book."""
     query = select(Borrowing).where(Borrowing.id == borrowing_id).options(
-        selectinload(Borrowing.book),
+        selectinload(Borrowing.book).selectinload(PhysicalBook.borrowings),
         selectinload(Borrowing.user)
     )
     result = await db.execute(query)
@@ -343,18 +447,15 @@ async def issue_book(
     await db.refresh(borrowing)
     return borrowing
 
-
 @router.post("/borrowings/{borrowing_id}/return", response_model=BorrowingResponse)
 async def return_book(
         borrowing_id: int,
         db: Annotated[AsyncSession, Depends(get_db)],
         current_librarian: Annotated[User, Depends(get_current_librarian)]
 ):
-    """
-    Mark a borrowing as RETURNED. Set returned_at and update librarian_id.
-    """
+    """Librarian: Mark a book as returned."""
     query = select(Borrowing).where(Borrowing.id == borrowing_id).options(
-        selectinload(Borrowing.book),
+        selectinload(Borrowing.book).selectinload(PhysicalBook.borrowings),
         selectinload(Borrowing.user)
     )
     result = await db.execute(query)
@@ -373,3 +474,16 @@ async def return_book(
     await db.commit()
     await db.refresh(borrowing)
     return borrowing
+
+@router.get("/new", response_model=List[BookResponse])
+async def get_new_books(
+        db: Annotated[AsyncSession, Depends(get_db)],
+        limit: int = 10,
+):
+    """Get most recently added books."""
+    wp = with_polymorphic(Book, [PhysicalBook, EBook])
+    query = select(wp).order_by(desc(wp.id)).limit(limit).options(
+        selectinload(wp.PhysicalBook.borrowings)
+    )
+    result = await db.execute(query)
+    return result.scalars().all()

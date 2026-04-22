@@ -7,6 +7,7 @@ from pydantic import BaseModel
 class UserBase(BaseModel):
     username: str
     full_name: str
+    group: Optional[str]
 
 class UserCreate(UserBase):
     password: str
@@ -14,13 +15,14 @@ class UserCreate(UserBase):
 class UserUpdate(BaseModel):
     full_name: Optional[str] = None
     username: Optional[str] = None
-    password: Optional[str] = None
-    current_password: Optional[str] = None
+
+    last_password: Optional[str] = None
+    new_password: Optional[str] = None
+    repeat_new_password: Optional[str] = None
 
 class UserRead(UserBase):
     id: int
     is_active: bool
-    is_librarian: bool
     created_at: datetime
 
     class Config:

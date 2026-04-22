@@ -8,7 +8,7 @@ from pydantic import ValidationError
 
 from app.config import settings
 from app.database import async_session
-from app.models.user import User
+from app.models.user import User, UserRole
 from app.schemas.user import TokenData
 
 # We set auto_error=False to manually handle the error if both header and cookie are missing
@@ -25,7 +25,7 @@ async def get_current_user(
 ) -> User:
     # Try to get token from header first (OAuth2PasswordBearer), then cookie
     if not token:
-        token = request.cookies.get("access_token")
+        token = request.cookies.get("refresh_token")
     
     if not token:
         raise HTTPException(
@@ -65,7 +65,7 @@ async def get_current_user(
 async def get_current_librarian(
     current_user: Annotated[User, Depends(get_current_user)]
 ) -> User:
-    if not current_user.is_librarian:
+    if current_user.role != UserRole.LIBRARIAN:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="The user does not have enough privileges",
