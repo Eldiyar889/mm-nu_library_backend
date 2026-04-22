@@ -20,13 +20,8 @@ async def get_db():
 
 async def get_current_user(
     db: Annotated[AsyncSession, Depends(get_db)],
-    request: Request,
-    token: Annotated[Optional[str], Depends(oauth2_scheme)] = None
+    token: Annotated[Optional[str], Depends(oauth2_scheme)]
 ) -> User:
-    # Try to get token from header first (OAuth2PasswordBearer), then cookie
-    if not token:
-        token = request.cookies.get("refresh_token")
-    
     if not token:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

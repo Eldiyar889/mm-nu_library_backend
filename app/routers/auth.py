@@ -126,7 +126,13 @@ async def refresh_token(
 
     # Update the secure Refresh Cookie
     response.set_cookie(
-        key="refresh_token", value=new_refresh_token, httponly=True, samesite="lax", secure=True
+        key="refresh_token",
+        value=new_refresh_token,
+        httponly=True,
+        max_age=settings.REFRESH_TOKEN_EXPIRE_DAYS * 24 * 60 * 60,
+        expires=settings.REFRESH_TOKEN_EXPIRE_DAYS * 24 * 60 * 60,
+        samesite="lax",
+        secure=True
     )
     
     # Return new Access Token for localStorage
