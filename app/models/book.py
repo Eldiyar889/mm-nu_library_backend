@@ -63,7 +63,7 @@ class PhysicalBook(Book):
     __tablename__ = "physical_books"
 
     id: Mapped[int] = mapped_column(ForeignKey("books.id"), primary_key=True)
-    library_number: Mapped[str] = mapped_column(String(100), unique=True, index=True, nullable=True)
+    library_number: Mapped[str] = mapped_column(String(100), index=True, nullable=True)
 
     # Inventory Management
     stock_quantity: Mapped[int] = mapped_column(default=1)

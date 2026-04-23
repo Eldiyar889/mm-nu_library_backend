@@ -422,7 +422,8 @@ async def download_ebook(
 async def issue_book(
         borrowing_id: int,
         db: Annotated[AsyncSession, Depends(get_db)],
-        current_librarian: Annotated[User, Depends(get_current_librarian)]
+        current_librarian: Annotated[User, Depends(get_current_librarian)],
+        days: int = 14
 ):
     """Librarian: Issue a reserved physical book."""
     query = select(Borrowing).where(Borrowing.id == borrowing_id).options(
@@ -440,7 +441,7 @@ async def issue_book(
 
     borrowing.status = BorrowingStatus.ISSUED
     borrowing.issued_at = datetime.now()
-    borrowing.due_date = datetime.now() + timedelta(days=14)
+    borrowing.due_date = datetime.now() + timedelta(days=days)
     borrowing.librarian_id = current_librarian.id
 
     await db.commit()

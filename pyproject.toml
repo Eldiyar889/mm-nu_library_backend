@@ -13,4 +13,5 @@ dependencies = [
     "sqlalchemy>=2.0.48",
     "pyjwt>=2.12.1",
     "pwdlib[argon2]>=0.3.0",
+    "aiofiles>=25.1.0",
 ]

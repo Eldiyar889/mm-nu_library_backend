@@ -73,7 +73,7 @@ async def login(
         max_age=settings.REFRESH_TOKEN_EXPIRE_DAYS * 24 * 60 * 60,
         expires=settings.REFRESH_TOKEN_EXPIRE_DAYS * 24 * 60 * 60,
         samesite="lax",
-        secure=True,
+        secure=settings.COOKIE_SECURE,
     )
 
     # Return Access Token in JSON (So JS can save it to localStorage)
@@ -132,7 +132,7 @@ async def refresh_token(
         max_age=settings.REFRESH_TOKEN_EXPIRE_DAYS * 24 * 60 * 60,
         expires=settings.REFRESH_TOKEN_EXPIRE_DAYS * 24 * 60 * 60,
         samesite="lax",
-        secure=True
+        secure=settings.COOKIE_SECURE
     )
     
     # Return new Access Token for localStorage
